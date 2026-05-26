@@ -3,7 +3,9 @@
  *  Licensed under the MIT License. See LICENSE.md in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IContainersClient, PodmanClient, VoidCommandResponse } from '@microsoft/vscode-container-client';
+import { IActionContext } from '@microsoft/vscode-azext-utils';
+import { IContainersClient, parseDockerLikeImageName, PodmanClient, VoidCommandResponse } from '@microsoft/vscode-container-client';
+import { CommandLineArgs, composeArgs, withArg, withNamedArg } from '@microsoft/vscode-processutils';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -26,12 +28,6 @@ function isPodman(client: IContainersClient): boolean {
 
 interface ExportImageOptions {
     source?: 'docker-daemon' | 'registry';
-}
-
-interface ParsedRegistryReference {
-    registry: string;
-    repository: string;
-    referenceSuffix: string;
 }
 
 function writeExportMetadata(
@@ -57,84 +53,33 @@ function sanitizeImageName(reference: string): string {
         .replace(/^_|_$/g, '');
 }
 
-function getReferenceTag(reference: string): string | null {
-    const lastSlash = reference.lastIndexOf('/');
-    const lastColon = reference.lastIndexOf(':');
-
-    if (lastColon > lastSlash) {
-        return reference.slice(lastColon + 1);
-    }
-
-    return null;
-}
-
 function asTaggedLayoutRef(layoutPath: string, tag: string): string {
     return `${layoutPath}:${tag}`;
 }
 
-function hasExplicitRegistry(firstPathPart: string): boolean {
-    return (
-        firstPathPart.includes('.') || firstPathPart.includes(':') || firstPathPart === 'localhost'
-    );
-}
+function toNormalizedRegistryReference(reference: string): string {
+    const info = parseDockerLikeImageName(reference);
 
-function parseReference(reference: string): { name: string; referenceSuffix: string } {
-    const digestIndex = reference.indexOf('@');
-
-    if (digestIndex >= 0) {
-        return {
-            name: reference.slice(0, digestIndex),
-            referenceSuffix: reference.slice(digestIndex),
-        };
-    }
-
-    const lastSlash = reference.lastIndexOf('/');
-    const lastColon = reference.lastIndexOf(':');
-
-    if (lastColon > lastSlash) {
-        return {
-            name: reference.slice(0, lastColon),
-            referenceSuffix: reference.slice(lastColon),
-        };
-    }
-
-    return { name: reference, referenceSuffix: '' };
-}
-
-function normalizeRegistryReference(reference: string): ParsedRegistryReference {
-    const { name, referenceSuffix } = parseReference(reference);
-    const nameParts = name.split('/').filter(Boolean);
-
-    if (nameParts.length === 0) {
+    if (!info.image) {
         throw new Error(vscode.l10n.t('Invalid image reference: {0}', reference));
     }
 
-    if (hasExplicitRegistry(nameParts[0])) {
-        return {
-            registry: nameParts[0],
-            repository: nameParts.slice(1).join('/'),
-            referenceSuffix,
-        };
+    const registry = info.registry || 'docker.io';
+    // docker.io implicitly places top-level images under the `library` namespace.
+    const imagePath =
+        registry === 'docker.io' && !info.image.includes('/')
+            ? `library/${info.image}`
+            : info.image;
+
+    let suffix = '';
+    if (info.tag) {
+        suffix += `:${info.tag}`;
+    }
+    if (info.digest) {
+        suffix += `@${info.digest}`;
     }
 
-    if (nameParts.length === 1) {
-        return {
-            registry: 'docker.io',
-            repository: `library/${nameParts[0]}`,
-            referenceSuffix,
-        };
-    }
-
-    return {
-        registry: 'docker.io',
-        repository: nameParts.join('/'),
-        referenceSuffix,
-    };
-}
-
-function toNormalizedRegistryReference(reference: string): string {
-    const parsed = normalizeRegistryReference(reference);
-    return `${parsed.registry}/${parsed.repository}${parsed.referenceSuffix}`;
+    return `${registry}/${imagePath}${suffix}`;
 }
 
 async function resolveLocalImagePlatform(reference: string): Promise<string | null> {
@@ -154,7 +99,7 @@ async function resolveLocalImagePlatform(reference: string): Promise<string | nu
     }
 }
 
-async function runTask(command: string, args: string[], taskName: string): Promise<void> {
+async function runTask(command: string, args: CommandLineArgs, taskName: string): Promise<void> {
     const runner = new TaskCommandRunnerFactory({
         taskName,
         alwaysRunNew: true,
@@ -172,11 +117,12 @@ async function dockerSaveToTar(
     tarPath: string,
     platform?: string
 ): Promise<void> {
-    const args = ['save'];
-    if (platform) {
-        args.push('--platform', platform);
-    }
-    args.push(reference, '-o', tarPath);
+    const args = composeArgs(
+        withArg('save'),
+        withNamedArg('--platform', platform),
+        withArg(reference),
+        withNamedArg('-o', tarPath),
+    )();
 
     await runTask(
         containerCommandName,
@@ -190,17 +136,32 @@ async function podmanSaveToOciLayout(
     reference: string,
     outputDir: string
 ): Promise<void> {
+    // Podman can write an OCI layout directly, but it doesn't create the output directory if it doesn't exist, so ensure it exists first.
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    const args = composeArgs(
+        withArg('save'),
+        withNamedArg('--format', 'oci-dir'),
+        withNamedArg('--output', outputDir),
+        withArg(reference),
+    )();
+
     await runTask(
         podmanCommandName,
-        ['save', '--format', 'oci-dir', '--output', outputDir, reference],
+        args,
         vscode.l10n.t('Save {0} as OCI layout', reference)
     );
 }
 
 async function podmanPull(podmanCommandName: string, reference: string): Promise<void> {
+    const args = composeArgs(
+        withArg('pull'),
+        withArg(reference),
+    )();
+
     await runTask(
         podmanCommandName,
-        ['pull', reference],
+        args,
         vscode.l10n.t('Pull {0}', reference)
     );
 }
@@ -211,16 +172,15 @@ async function convertArchiveToOciLayout(
     sourceTag: string,
     destinationTag: string
 ): Promise<void> {
+    const args = composeArgs(
+        withArg('cp', '--recursive'),
+        withNamedArg('--from-oci-layout', asTaggedLayoutRef(archivePath, sourceTag)),
+        withNamedArg('--to-oci-layout', asTaggedLayoutRef(outputDir, destinationTag)),
+    )();
+
     await runTask(
         ORAS_COMMAND,
-        [
-            'cp',
-            '--recursive',
-            '--from-oci-layout',
-            asTaggedLayoutRef(archivePath, sourceTag),
-            '--to-oci-layout',
-            asTaggedLayoutRef(outputDir, destinationTag),
-        ],
+        args,
         vscode.l10n.t('Convert archive to OCI layout')
     );
 }
@@ -235,17 +195,17 @@ async function orasCopyFromRegistry(reference: string, outputDir: string): Promi
         );
     }
 
-    const destinationTag = getReferenceTag(registryReference) ?? 'latest';
+    const destinationTag = parseDockerLikeImageName(registryReference).tag ?? 'latest';
+
+    const args = composeArgs(
+        withArg('cp', '--recursive'),
+        withArg(registryReference),
+        withNamedArg('--to-oci-layout', asTaggedLayoutRef(outputDir, destinationTag)),
+    )();
 
     await runTask(
         ORAS_COMMAND,
-        [
-            'cp',
-            '--recursive',
-            registryReference,
-            '--to-oci-layout',
-            asTaggedLayoutRef(outputDir, destinationTag),
-        ],
+        args,
         vscode.l10n.t('Copy {0} to OCI layout', registryReference)
     );
 }
@@ -273,7 +233,7 @@ async function dockerSaveAndConvert(
     }
 
     try {
-        const referenceTag = getReferenceTag(reference) ?? 'latest';
+        const referenceTag = parseDockerLikeImageName(reference).tag ?? 'latest';
 
         await dockerSaveToTar(client.commandName, reference, tarPath);
 
@@ -287,7 +247,7 @@ async function dockerSaveAndConvert(
 
             ext.outputChannel.warn(
                 vscode.l10n.t(
-                    'Multi-platform conversion failed; retrying with concrete platform {0}…',
+                    'Multi-platform conversion failed; retrying with concrete platform {0}...',
                     localPlatform
                 )
             );
@@ -361,11 +321,12 @@ async function exportFromRegistry(
 }
 
 export async function exportImageToOciLayout(
+    context: IActionContext,
     reference: string,
     options?: ExportImageOptions
 ): Promise<string> {
     const source = options?.source ?? 'docker-daemon';
-    const configuredDir = await resolveExportDir();
+    const configuredDir = await resolveExportDir(context);
     const imageDirName = sanitizeImageName(reference);
 
     const outputDir = configuredDir

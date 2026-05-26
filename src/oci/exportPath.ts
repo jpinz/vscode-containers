@@ -3,6 +3,13 @@
  *  Licensed under the MIT License. See LICENSE.md in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import {
+    AzureWizard,
+    AzureWizardExecuteStep,
+    AzureWizardPromptStep,
+    IActionContext,
+    IAzureQuickPickItem,
+} from '@microsoft/vscode-azext-utils';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -11,131 +18,146 @@ import { configPrefix } from '../constants';
 
 const EXPORT_PATH_SETTING = 'oci.exportPath';
 
-function getExportDir(): string {
-    return vscode.workspace.getConfiguration(configPrefix).get<string>(EXPORT_PATH_SETTING, '');
+interface ExportPathWizardContext extends IActionContext {
+    // True if the user chose the OS temp folder; false if they chose a specific folder.
+    useTempDir?: boolean;
+
+    // The chosen directory; empty string means "use the OS temp folder".
+    chosenDir?: string;
+
+    // Where to persist the chosen value. `'none'` means don't save.
+    persistenceTarget?: vscode.ConfigurationTarget | 'none';
 }
 
-async function promptForExportDir(): Promise<string | undefined> {
-    const tempLabel = vscode.l10n.t('Use temporary folder');
-    const chooseLabel = vscode.l10n.t('Choose folder…');
+type ExportTarget = 'temp' | 'choose';
 
-    const choice = await vscode.window.showQuickPick(
-        [
-            { label: tempLabel, description: os.tmpdir() },
-            { label: chooseLabel },
-        ],
-        {
+class ChooseExportTargetPromptStep extends AzureWizardPromptStep<ExportPathWizardContext> {
+    public async prompt(wizardContext: ExportPathWizardContext): Promise<void> {
+        const picks: IAzureQuickPickItem<ExportTarget>[] = [
+            { label: vscode.l10n.t('Use temporary folder'), description: os.tmpdir(), data: 'temp' },
+            { label: vscode.l10n.t('Choose folder...'), data: 'choose' },
+        ];
+
+        const response = await wizardContext.ui.showQuickPick(picks, {
             placeHolder: vscode.l10n.t('Where should exported OCI layouts be saved?'),
-            ignoreFocusOut: true,
-        }
-    );
+        });
 
-    if (!choice) {
-        return undefined;
+        wizardContext.useTempDir = response.data === 'temp';
+        if (wizardContext.useTempDir) {
+            wizardContext.chosenDir = '';
+        }
     }
 
-    let dir: string;
+    public shouldPrompt(wizardContext: ExportPathWizardContext): boolean {
+        return wizardContext.useTempDir === undefined;
+    }
+}
 
-    if (choice.label === tempLabel) {
-        dir = '';
-    } else {
-        const selected = await vscode.window.showOpenDialog({
+class ChooseFolderPromptStep extends AzureWizardPromptStep<ExportPathWizardContext> {
+    public async prompt(wizardContext: ExportPathWizardContext): Promise<void> {
+        const selected = await wizardContext.ui.showOpenDialog({
             canSelectFiles: false,
             canSelectFolders: true,
             canSelectMany: false,
             openLabel: vscode.l10n.t('Select Export Folder'),
         });
 
-        if (!selected || !selected[0]) {
-            return undefined;
-        }
-
-        dir = selected[0].fsPath;
+        wizardContext.chosenDir = selected[0].fsPath;
     }
 
-    const dontSave = vscode.l10n.t("Don't save");
-    const workspaceLabel = vscode.l10n.t('This workspace');
-    const userLabel = vscode.l10n.t('All workspaces (user settings)');
-
-    const saveChoice = await vscode.window.showQuickPick(
-        [
-            { label: dontSave, description: vscode.l10n.t('Ask again next time') },
-            { label: workspaceLabel, description: vscode.l10n.t('Save in workspace settings') },
-            { label: userLabel, description: vscode.l10n.t('Save in user settings') },
-        ],
-        {
-            placeHolder: vscode.l10n.t('Remember this choice?'),
-            ignoreFocusOut: true,
-        }
-    );
-
-    if (!saveChoice) {
-        return undefined;
+    public shouldPrompt(wizardContext: ExportPathWizardContext): boolean {
+        return !wizardContext.useTempDir && wizardContext.chosenDir === undefined;
     }
-
-    if (saveChoice.label === workspaceLabel) {
-        await vscode.workspace
-            .getConfiguration(configPrefix)
-            .update(EXPORT_PATH_SETTING, dir, vscode.ConfigurationTarget.Workspace);
-    } else if (saveChoice.label === userLabel) {
-        await vscode.workspace
-            .getConfiguration(configPrefix)
-            .update(EXPORT_PATH_SETTING, dir, vscode.ConfigurationTarget.Global);
-    }
-
-    if (dir) {
-        await offerGitignore(dir);
-    }
-
-    return dir;
 }
 
-async function offerGitignore(exportDir: string): Promise<void> {
-    const workspaceFolders = vscode.workspace.workspaceFolders;
+class ChoosePersistenceTargetPromptStep extends AzureWizardPromptStep<ExportPathWizardContext> {
+    public async prompt(wizardContext: ExportPathWizardContext): Promise<void> {
+        const picks: IAzureQuickPickItem<vscode.ConfigurationTarget | 'none'>[] = [
+            { label: vscode.l10n.t("Don't save"), description: vscode.l10n.t('Ask again next time'), data: 'none' },
+            { label: vscode.l10n.t('This workspace'), description: vscode.l10n.t('Save in workspace settings'), data: vscode.ConfigurationTarget.Workspace },
+            { label: vscode.l10n.t('All workspaces (user settings)'), description: vscode.l10n.t('Save in user settings'), data: vscode.ConfigurationTarget.Global },
+        ];
 
-    if (!workspaceFolders) {
-        return;
+        const response = await wizardContext.ui.showQuickPick(picks, {
+            placeHolder: vscode.l10n.t('Remember this choice?'),
+        });
+
+        wizardContext.persistenceTarget = response.data;
     }
 
-    for (const folder of workspaceFolders) {
-        const rootPath = folder.uri.fsPath;
-        const relativePath = path.relative(rootPath, exportDir);
+    public shouldPrompt(wizardContext: ExportPathWizardContext): boolean {
+        return wizardContext.persistenceTarget === undefined;
+    }
+}
 
-        if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-            continue;
-        }
+class SaveExportPathSettingStep extends AzureWizardExecuteStep<ExportPathWizardContext> {
+    public priority: number = 100;
 
-        const gitignorePath = path.join(rootPath, '.gitignore');
+    public async execute(wizardContext: ExportPathWizardContext): Promise<void> {
+        await vscode.workspace
+            .getConfiguration(configPrefix)
+            .update(EXPORT_PATH_SETTING, wizardContext.chosenDir ?? '', wizardContext.persistenceTarget as vscode.ConfigurationTarget);
+    }
 
-        if (!fs.existsSync(gitignorePath)) {
-            continue;
-        }
+    public shouldExecute(wizardContext: ExportPathWizardContext): boolean {
+        return wizardContext.persistenceTarget !== undefined && wizardContext.persistenceTarget !== 'none';
+    }
+}
 
-        const entry = `/${relativePath.replace(/\\/g, '/')}/`;
-        const content = fs.readFileSync(gitignorePath, 'utf8');
+class OfferGitignoreStep extends AzureWizardExecuteStep<ExportPathWizardContext> {
+    public priority: number = 200;
 
-        if (content.includes(entry) || content.includes(entry.slice(0, -1))) {
+    public async execute(wizardContext: ExportPathWizardContext): Promise<void> {
+        const exportDir = wizardContext.chosenDir;
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+
+        if (!exportDir || !workspaceFolders) {
             return;
         }
 
-        const yes = vscode.l10n.t('Yes');
-        const answer = await vscode.window.showInformationMessage(
-            vscode.l10n.t('Add {0} to .gitignore?', entry),
-            yes,
-            vscode.l10n.t('No')
-        );
+        for (const folder of workspaceFolders) {
+            const rootPath = folder.uri.fsPath;
+            const relativePath = path.relative(rootPath, exportDir);
 
-        if (answer === yes) {
-            const newline = content.endsWith('\n') ? '' : '\n';
-            fs.appendFileSync(gitignorePath, `${newline}${entry}\n`);
+            if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+                continue;
+            }
+
+            const gitignorePath = path.join(rootPath, '.gitignore');
+
+            if (!fs.existsSync(gitignorePath)) {
+                continue;
+            }
+
+            const entry = `/${relativePath.replace(/\\/g, '/')}/`;
+            const content = fs.readFileSync(gitignorePath, 'utf8');
+
+            if (content.includes(entry) || content.includes(entry.slice(0, -1))) {
+                return;
+            }
+
+            const yes = vscode.l10n.t('Yes');
+            const answer = await vscode.window.showInformationMessage(
+                vscode.l10n.t('Add {0} to .gitignore?', entry),
+                yes,
+                vscode.l10n.t('No')
+            );
+
+            if (answer === yes) {
+                const newline = content.endsWith('\n') ? '' : '\n';
+                fs.appendFileSync(gitignorePath, `${newline}${entry}\n`);
+            }
+
+            return;
         }
+    }
 
-        return;
+    public shouldExecute(wizardContext: ExportPathWizardContext): boolean {
+        return wizardContext.useTempDir === false && !!wizardContext.chosenDir;
     }
 }
 
-export async function resolveExportDir(): Promise<string> {
-    let configuredDir = getExportDir();
+export async function resolveExportDir(context: IActionContext): Promise<string> {
     const config = vscode.workspace.getConfiguration(configPrefix);
     const inspect = config.inspect<string>(EXPORT_PATH_SETTING);
 
@@ -146,15 +168,27 @@ export async function resolveExportDir(): Promise<string> {
                 inspect.globalValue !== undefined)
     );
 
-    if (!hasExplicitSetting) {
-        const chosen = await promptForExportDir();
-
-        if (chosen === undefined) {
-            throw new vscode.CancellationError();
-        }
-
-        configuredDir = chosen;
+    if (hasExplicitSetting) {
+        return config.get<string>(EXPORT_PATH_SETTING, '');
     }
 
-    return configuredDir;
+    const wizardContext = context as ExportPathWizardContext;
+
+    const wizard = new AzureWizard<ExportPathWizardContext>(wizardContext, {
+        title: vscode.l10n.t('Configure OCI Layout Export Folder'),
+        promptSteps: [
+            new ChooseExportTargetPromptStep(),
+            new ChooseFolderPromptStep(),
+            new ChoosePersistenceTargetPromptStep(),
+        ],
+        executeSteps: [
+            new SaveExportPathSettingStep(),
+            new OfferGitignoreStep(),
+        ],
+    });
+
+    await wizard.prompt();
+    await wizard.execute();
+
+    return wizardContext.chosenDir ?? '';
 }

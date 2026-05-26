@@ -91,12 +91,12 @@ export async function exploreImage(context: IActionContext): Promise<void> {
             location: vscode.ProgressLocation.Notification,
             title:
                 mode === 'registry'
-                    ? vscode.l10n.t('Copying {0} from registry to OCI layout…', reference)
-                    : vscode.l10n.t('Exporting {0} to OCI layout…', reference),
+                    ? vscode.l10n.t('Copying {0} from registry to OCI layout...', reference)
+                    : vscode.l10n.t('Exporting {0} to OCI layout...', reference),
             cancellable: false,
         },
         () =>
-            exportImageToOciLayout(reference, {
+            exportImageToOciLayout(context, reference, {
                 source: mode === 'registry' ? 'registry' : 'docker-daemon',
             })
     );

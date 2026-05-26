@@ -7,13 +7,8 @@ import { callWithTelemetryAndErrorHandling, IActionContext } from '@microsoft/vs
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { configPrefix } from '../constants';
 import { ext } from '../extensionVariables';
-import { OCI_BLOB_SCHEME, OciBlobContentProvider, toOciBlobUri } from './ociBlobContentProvider';
-
-const DEFAULT_JSON_DETECTION_MAX_SIZE_MB = 8;
-const JSON_DETECTION_MAX_SIZE_MB_SETTING = 'oci.jsonDetectionMaxSizeMB';
-const BYTES_PER_MB = 1024 * 1024;
+import { getJsonDetectionMaxBytes, OCI_BLOB_SCHEME, OciBlobContentProvider, toOciBlobUri } from './ociBlobContentProvider';
 
 // Matches "<algorithm>:<hash>" for the digest formats we care about.
 const DIGEST_PATTERN = /\b(sha256|sha384|sha512):([a-fA-F0-9]+)\b/g;
@@ -24,19 +19,6 @@ interface DescriptorInfo {
     artifactType?: string;
     platform?: { os?: string; architecture?: string; variant?: string };
     annotations?: Record<string, string>;
-}
-
-function getJsonDetectionMaxBytes(): number {
-    const configured = vscode.workspace
-        .getConfiguration(configPrefix)
-        .get<number>(JSON_DETECTION_MAX_SIZE_MB_SETTING, DEFAULT_JSON_DETECTION_MAX_SIZE_MB);
-
-    const sizeMb =
-        typeof configured === 'number' && Number.isFinite(configured) && configured > 0
-            ? configured
-            : DEFAULT_JSON_DETECTION_MAX_SIZE_MB;
-
-    return Math.floor(sizeMb * BYTES_PER_MB);
 }
 
 function isLikelyOciDescriptorPath(fsPath: string): boolean {
@@ -128,7 +110,7 @@ function findDigestAtPosition(
     while ((match = DIGEST_PATTERN.exec(lineText)) !== null) {
         const start = match.index;
         const end = start + match[0].length;
-        if (position.character >= start && position.character <= end) {
+        if (position.character >= start && position.character < end) {
             return {
                 range: new vscode.Range(position.line, start, position.line, end),
                 algorithm: match[1].toLowerCase(),
@@ -361,7 +343,7 @@ class OciDescriptorHoverProvider implements vscode.HoverProvider {
         }
 
         const markdown = new vscode.MarkdownString(lines.join('\n'));
-        markdown.isTrusted = true;
+        markdown.isTrusted = { enabledCommands: ['vscode.open'] };
         markdown.supportHtml = false;
 
         return new vscode.Hover(markdown, digest.range);

@@ -30,10 +30,10 @@ export async function exportImageToLayout(
     const outputDir = await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title: vscode.l10n.t('Exporting {0} to OCI layout…', reference),
+            title: vscode.l10n.t('Exporting {0} to OCI layout...', reference),
             cancellable: false,
         },
-        () => exportImageToOciLayout(reference)
+        () => exportImageToOciLayout(context, reference)
     );
 
     await ext.ociRoot.setRootPath(outputDir, context);

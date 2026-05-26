@@ -346,7 +346,7 @@ function getNodeLabel(node: LayoutNode): string {
     }
 
     if (node.digest) {
-        return l10n.t('{0} {1}…', getKindDisplayLabel(node.kind), node.digest.slice(0, 19));
+        return l10n.t('{0} {1}...', getKindDisplayLabel(node.kind), node.digest.slice(0, 19));
     }
 
     return getKindDisplayLabel(node.kind);
@@ -405,7 +405,7 @@ function createDescriptorNode(
         kind: getReadableKind(descriptor.mediaType, jsonResult ? jsonResult.json : null),
         digest,
         mediaType: descriptor.mediaType || null,
-        size: descriptor.size || null,
+        size: typeof descriptor.size === 'number' ? descriptor.size : null,
         annotations: descriptor.annotations || null,
         artifactType: descriptor.artifactType || null,
         platform: descriptor.platform || null,

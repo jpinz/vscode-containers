@@ -6,11 +6,11 @@
 import { AzExtParentTreeItem, AzExtTreeItem, GenericTreeItem, IActionContext } from "@microsoft/vscode-azext-utils";
 import { PodmanClient } from "@microsoft/vscode-container-client";
 import * as vscode from "vscode";
+import which from "which";
 import { ext } from "../../extensionVariables";
 import { OCI_ROOT_PATH_STATE_KEY, ORAS_COMMAND } from "../../oci/constants";
 import { loadCustomLabelRules } from "../../oci/customLabels";
 import { parseLayout } from "../../oci/ociLayout";
-import { findOnPath } from "../../utils/findOnPath";
 import { OciNodeTreeItem } from "./OciNodeTreeItem";
 
 export class OciLayoutTreeItem extends AzExtParentTreeItem {
@@ -86,7 +86,7 @@ export class OciLayoutTreeItem extends AzExtParentTreeItem {
             return undefined;
         }
 
-        if (findOnPath(ORAS_COMMAND)) {
+        if (await which(ORAS_COMMAND, { nothrow: true })) {
             return undefined;
         }
 

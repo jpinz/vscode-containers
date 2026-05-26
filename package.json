@@ -3452,6 +3452,7 @@
         "@types/node": "22.x",
         "@types/semver": "^7.3.13",
         "@types/vscode": "1.105.0",
+        "@types/which": "^3.0.4",
         "@vscode/test-cli": "*",
         "@vscode/test-electron": "*",
         "@vscode/vsce": "*",
